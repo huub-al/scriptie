@@ -1,10 +1,9 @@
 """
-hypergraph.py
+hypergraph_v2.py
 Huub Al 
 
-This script contains the hypergraph class and 
-graph subset class for training and inference of
-the AllSetTransformer via https://github.com/jianhao2016/AllSet
+This script contains the hypergraph class for SetGNN compatibility.
+It converts the arXiv dataset into a format suitable for SetGNN training.
 """
 import numpy as np
 import torch
@@ -16,11 +15,13 @@ from scipy import sparse
 import re
 from transformers import AutoTokenizer, AutoModel
 from tqdm import tqdm
+from torch_geometric.data import Data
+from torch_sparse import coalesce
 
 
-class ArxivHyperGraph:
+class ArxivHyperGraphSetGNN:
     """
-    Constructs main arXiv Hypergraph
+    Constructs arXiv Hypergraph in SetGNN compatible format
     """
     def __init__(self, input_file, batch_size=32):
         """
@@ -31,7 +32,7 @@ class ArxivHyperGraph:
             batch_size (int): Number of papers to process at once (default: 32)
         """
         # Check if pickle file exists
-        pickle_file = input_file.replace('.json.gz', '.pkl')
+        pickle_file = input_file.replace('.json.gz', '_setgnn.pkl')
         if os.path.exists(pickle_file):
             print(f"Loading from pickle file: {pickle_file}")
             with open(pickle_file, 'rb') as f:
@@ -45,7 +46,7 @@ class ArxivHyperGraph:
         self.model = AutoModel.from_pretrained('allenai/scibert_scivocab_uncased')
         
         # Move model to GPU if available
-        self.device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = self.model.to(self.device)
         self.model.eval()  # Set to evaluation mode
         
@@ -112,58 +113,73 @@ class ArxivHyperGraph:
         self.paper_to_idx = {pid: idx for idx, pid in enumerate(self.edge_dict.keys())}
         self.author_to_idx = {aid: idx for idx, aid in enumerate(self.author_dict.keys())}
         
-        # Create incidence matrix for hypergraph
-        num_papers = len(self.edge_dict)
-        num_authors = len(self.author_dict)
+        # Create edge index for SetGNN format
+        num_nodes = len(self.author_dict)  # Authors are nodes
+        num_hyperedges = len(self.edge_dict)  # Papers are hyperedges
         
-        # Create lists for sparse matrix construction
-        rows, cols, data = [], [], []
+        # Create lists for edge index construction
+        node_list = []
+        edge_list = []
         
-        # Fill incidence matrix data
+        # Fill edge index data
         for paper_id, authors in self.paper_to_authors.items():
-            paper_idx = self.paper_to_idx[paper_id]
+            paper_idx = self.paper_to_idx[paper_id] + num_nodes  # Hyperedge indices start after nodes
             for author in authors:
-                author_idx = self.author_to_idx[author]
-                rows.append(paper_idx)
-                cols.append(author_idx)
-                data.append(1.0)
+                if author in self.author_to_idx:  # Skip authors that were filtered out
+                    author_idx = self.author_to_idx[author]
+                    node_list.append(author_idx)
+                    edge_list.append(paper_idx)
         
-        # Create sparse incidence matrix
-        self.H = sparse.csr_matrix((data, (rows, cols)), shape=(num_papers, num_authors), dtype=np.float32)
+        # Create edge index tensor
+        edge_index = np.array([node_list + edge_list, edge_list + node_list], dtype=np.int64)
+        edge_index = torch.LongTensor(edge_index)
+        
+        # Create hyperedge features from paper embeddings
+        hyperedge_features = torch.zeros(num_hyperedges, 768)  # 768 is the SciBERT embedding dimension
+        for paper_id, paper_data in self.edge_dict.items():
+            paper_idx = self.paper_to_idx[paper_id]
+            hyperedge_features[paper_idx] = torch.tensor(paper_data['embedding'])
+        
+        # Create edge attributes by repeating hyperedge features for each edge
+        edge_attr = torch.zeros(edge_index.size(1), 768)
+        for i, (src, dst) in enumerate(edge_index.t()):
+            if dst >= num_nodes:  # If this is a hyperedge
+                edge_attr[i] = hyperedge_features[dst - num_nodes]
+            else:  # If this is a node
+                edge_attr[i] = hyperedge_features[src - num_nodes]
+        
+        # Coalesce edge index and edge attributes to remove duplicates and sort
+        total_num_node_id_he_id = edge_index.max() + 1
+        edge_index, edge_attr = coalesce(edge_index, edge_attr, total_num_node_id_he_id, total_num_node_id_he_id)
+        
+        # Create node features (author embeddings)
+        # For now, we'll use random features since we don't have author embeddings
+        # In a real implementation, you might want to use author-specific features
+        node_features = torch.randn(num_nodes, 768)  # 768 is the SciBERT embedding dimension
+        
+        # Create labels (paper categories)
+        # For now, we'll use random labels since we don't have a specific task
+        # In a real implementation, you would use actual labels based on your task
+        num_classes = len(set(paper['category'] for paper in self.edge_dict.values()))
+        labels = torch.randint(0, num_classes, (num_nodes,))
+        
+        # Create PyTorch Geometric Data object
+        self.data = Data(
+            x=node_features,
+            edge_index=edge_index,
+            edge_attr=edge_attr,  # Add hyperedge features
+            y=labels,
+            n_x=torch.tensor([num_nodes]),
+            num_hyperedges=torch.tensor([num_hyperedges])
+        )
         
         # Save to pickle file
         print(f"Saving to pickle file: {pickle_file}")
         with open(pickle_file, 'wb') as f:
             pickle.dump(self, f)
-
-class ArxivSubGraph(ArxivHyperGraph):
-    """
-    Constructs subset of arXiv graph.
-    """
-    def __init__(self, input_file, dropout=0.1):
+    
+    def get_data(self):
         """
-        constructs subset of graph with some
-        edges dropped out.
-        
-        Args:
-            input_file (str): Path to the JSON.GZ file containing arXiv data
-            dropout (float): Probability of dropping an edge (default: 0.1)
+        Returns the PyTorch Geometric Data object
         """
-        super().__init__(input_file)
-        self.sub_H = 0 # new strictly smaller incidence matrix
-        self.edges_left = [] # list with keys of edges that are left
-        self.node_features = {} # dict with aggregated embeddings, 
-        # should pay attention to information leakage. 
-
-    def generate_edge(self):
-        """
-        generates a fake hyper edge.
-        """
-
-
-
-"""
-- wat referenties uit de papers bekijken
-- human in the loop / interactive learning 
-- plaatjes/blokschema maken in powerpoint draw.io
-"""
+        return self.data
