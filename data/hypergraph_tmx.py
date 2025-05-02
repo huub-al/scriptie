@@ -15,18 +15,20 @@ import os
 from scipy import sparse
 import re
 from transformers import AutoTokenizer, AutoModel
+from tqdm import tqdm
 
 
 class ArxivHyperGraph:
     """
     Constructs main arXiv Hypergraph
     """
-    def __init__(self, input_file):
+    def __init__(self, input_file, batch_size=32):
         """
         Loads existing arXiv structure or creates anew.
         
         Args:
             input_file (str): Path to the JSON.GZ file containing arXiv data
+            batch_size (int): Number of papers to process at once (default: 32)
         """
         # Check if pickle file exists
         pickle_file = input_file.replace('.json.gz', '.pkl')
@@ -41,6 +43,10 @@ class ArxivHyperGraph:
         print("Loading SciBERT model...")
         self.tokenizer = AutoTokenizer.from_pretrained('allenai/scibert_scivocab_uncased')
         self.model = AutoModel.from_pretrained('allenai/scibert_scivocab_uncased')
+        
+        # Move model to GPU if available
+        self.device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+        self.model = self.model.to(self.device)
         self.model.eval()  # Set to evaluation mode
         
         # Initialize data structures
@@ -49,25 +55,19 @@ class ArxivHyperGraph:
         self.paper_to_authors = {}  # dict mapping paper IDs to their authors
         
         # Load and process the JSON.GZ file
+        print("Loading papers and generating embeddings...")
+        papers = []
         with gzip.open(input_file, 'rt', encoding='utf-8') as f:
             for line in f:
-                paper = json.loads(line)
+                papers.append(json.loads(line))
+        
+        # Process papers in batches
+        for i in tqdm(range(0, len(papers), batch_size)):
+            batch = papers[i:i + batch_size]
+            
+            # Process each paper in the batch
+            for paper in batch:
                 paper_id = paper['id']
-                
-                # Generate SciBERT embedding for abstract
-                abstract = paper['abstract']
-                # Tokenize and get model output
-                with torch.no_grad():
-                    inputs = self.tokenizer(abstract, return_tensors="pt", truncation=True, max_length=512)
-                    outputs = self.model(**inputs)
-                    # Use [CLS] token embedding as paper representation
-                    embedding = outputs.last_hidden_state[0, 0, :].numpy()
-                
-                # Store paper data and embedding in edge_dict
-                self.edge_dict[paper_id] = {
-                    'data': paper,
-                    'embedding': embedding
-                }
                 
                 # Process authors - filter out institutional entries
                 authors = paper['authors'].split(', ')
@@ -88,19 +88,38 @@ class ArxivHyperGraph:
                     if author not in self.author_dict:
                         self.author_dict[author] = []
                     self.author_dict[author].append(paper_id)
+            
+            # Generate embeddings for the batch
+            abstracts = [paper['abstract'] for paper in batch]
+            with torch.no_grad():
+                inputs = self.tokenizer(abstracts, return_tensors="pt", truncation=True, max_length=512, padding=True)
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                outputs = self.model(**inputs)
+                embeddings = outputs.last_hidden_state[:, 0, :].cpu().numpy()
+            
+            # Store paper data and embeddings
+            for paper, embedding in zip(batch, embeddings):
+                paper_id = paper['id']
+                # Take only the first category
+                category = paper['categories'][0]
+                self.edge_dict[paper_id] = {
+                    'data': paper,
+                    'embedding': embedding,
+                    'category': category
+                }
         
         # Create mapping from IDs to matrix indices
         self.paper_to_idx = {pid: idx for idx, pid in enumerate(self.edge_dict.keys())}
         self.author_to_idx = {aid: idx for idx, aid in enumerate(self.author_dict.keys())}
         
-        # Create sparse adjacency matrix
+        # Create incidence matrix for hypergraph
         num_papers = len(self.edge_dict)
         num_authors = len(self.author_dict)
         
         # Create lists for sparse matrix construction
         rows, cols, data = [], [], []
         
-        # Fill adjacency matrix data
+        # Fill incidence matrix data
         for paper_id, authors in self.paper_to_authors.items():
             paper_idx = self.paper_to_idx[paper_id]
             for author in authors:
@@ -109,8 +128,8 @@ class ArxivHyperGraph:
                 cols.append(author_idx)
                 data.append(1.0)
         
-        # Create sparse matrix
-        self.A = sparse.csr_matrix((data, (rows, cols)), shape=(num_papers, num_authors), dtype=np.float32)
+        # Create sparse incidence matrix
+        self.H = sparse.csr_matrix((data, (rows, cols)), shape=(num_papers, num_authors), dtype=np.float32)
         
         # Save to pickle file
         print(f"Saving to pickle file: {pickle_file}")
@@ -131,8 +150,8 @@ class ArxivSubGraph(ArxivHyperGraph):
             dropout (float): Probability of dropping an edge (default: 0.1)
         """
         super().__init__(input_file)
-        self.sub_A = 0 # new strictly smaller adjacency matrix.
-        self.edges_left = [] # list with keys of edges that are left.
+        self.sub_H = 0 # new strictly smaller incidence matrix
+        self.edges_left = [] # list with keys of edges that are left
         self.node_features = {} # dict with aggregated embeddings, 
         # should pay attention to information leakage. 
 

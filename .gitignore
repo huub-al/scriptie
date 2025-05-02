@@ -110,6 +110,7 @@ venv.bak/
 *.pkl
 config.json
 *.gz
+*.png
 
 # arxiv-public-datasets
 arxiv-public-datasets/
