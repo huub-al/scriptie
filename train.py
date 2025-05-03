@@ -90,7 +90,7 @@ def train_interactive_hgnn(input_file, num_epochs=15):
             # Forward pass
             optimizer.zero_grad()
             edge_embedding = edge_embedding.to(device)
-            prediction = model(node_features, new_H, edge_embedding)
+            prediction = model(node_features, new_H)
             
             # Calculate loss and backpropagate
             loss = criterion(prediction, target)
