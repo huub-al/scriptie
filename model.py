@@ -21,13 +21,13 @@ class InteractiveHGNN(nn.Module):
 
         # Head A: Hyperedge plausibility (binary classification)
         self.edge_classifier = nn.Sequential(
-            nn.Linear(in_dim * 2, hidden_dim),
+            nn.Linear(in_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 1)
         )
 
 
-    def forward(self, x, incidence_matrix, paper_embedding):
+    def forward(self, x, incidence_matrix):
         """
         we want to provide the linear layer with the
         message passing of the hyperedge and the original
@@ -39,7 +39,4 @@ class InteractiveHGNN(nn.Module):
         _, x_1 = self.encoder(x, incidence_matrix)
 
         # the last row of the x_1 matrix is the edge
-        # feature of the new hyperedge
-        edge_feature = x_1[-1]
-        combined = torch.cat([paper_embedding, edge_feature], dim=-1)
-        return self.edge_classifier(combined)
+        return self.edge_classifier(x_1[-1])

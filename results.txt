@@ -1,0 +1,14 @@
+Branches and results
+- b4375df6cd311444f31d0584626a5073ed765db8
+    forward with H + 1 column (hyperedge to predict)
+    prediction head with input dimension 2 * 768, learned hyperedge representations
+    + original embedding.   
+    Epoch 15/15, Average Loss: 0.3587
+    - Pretty good, maybe to reliant on original embedding.
+
+- 
+    forward with H + 1 column (hyperedge to predict)
+    prediction head with only learned hyperedge repr.
+    Epoch 8/15, Average Loss: 0.6670
+    No better than random guessing. The aggregation of features
+    over the node set is not very meaningful.
