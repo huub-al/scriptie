@@ -4,7 +4,7 @@ from collections import defaultdict
 
 # Parameters
 input_file = "arxiv-metadata-large.json.gz"
-total_samples = 2000
+total_samples = 200
 output_file = f"subset_cs_{total_samples}.json.gz"
 
 # Choose the CS subcategories you're interested in

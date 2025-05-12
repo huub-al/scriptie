@@ -1,0 +1,17 @@
+Papers als nodes en authors als hyperedges.
+-> forward (x_0, incidence) -> logits 
+    logits fungeren als classificatie en als confidence score.
+
+Interactief model:
+    -> laadt hypergraph structuur in.
+    HITL:
+        -> Kan nieuwe node classificeren
+            Model hoeft niet aangepast te worden bij nieuwe node zonder nieuwe
+            auteurs. Hypergraph structuur wel. Train als domein expert goedgekeurd heeft.
+        -> Kan nieuwe node classificeren met nieuwe auteur(s)
+            Model stelt hypergraph structuur en incidence matrix bij,
+            Train als domein expert goedgekeurd heeft.
+
+        Visualizatie:
+        -> Kijken hoe het toevoegen van nieuwe nodes en edges door de domein expert 
+            de accuracy verbeterd.

@@ -4,7 +4,7 @@ from collections import Counter
 import matplotlib.pyplot as plt
 
 # Parameters
-input_file = "subset_cs_2000.json.gz"
+input_file = "subset_cs_20000.json.gz"
 
 # Count top-level categories
 category_counts = Counter()

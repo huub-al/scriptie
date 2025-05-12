@@ -34,13 +34,13 @@ def main():
 
     in_channels = x.shape[1]
     out_channels = len(torch.unique(y))
-    hidden_channels = 256 
+    hidden_channels = 128 
 
     model = Network(in_channels, hidden_channels, out_channels, task_level="node").to(device)
     opt = torch.optim.Adam(model.parameters(), lr=0.01)
     loss_fn = torch.nn.CrossEntropyLoss()
 
-    num_epochs = 200
+    num_epochs = 15 
     for epoch in range(1, num_epochs + 1):
         model.train()
         opt.zero_grad()

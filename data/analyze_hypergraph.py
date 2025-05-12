@@ -1,96 +1,61 @@
-import numpy as np
-import matplotlib.pyplot as plt
-import scipy.stats as stats
-import seaborn as sns
-from hypergraph_tmx import ArxivHyperGraph
+# analyze_hypergraph.py
 
-def main(data_file):
-    # Load the ArxivHyperGraph object
-    graph = ArxivHyperGraph(data_file)
+import torch
+import statistics
+from collections import Counter
+from paperNodes_graph import HypergraphDataset
 
-    # Step 1: Extract author counts per paper
-    author_counts = [len(authors) for authors in graph.paper_to_authors.values() if len(authors) > 0]
-    author_counts = np.array(author_counts)
+def load_hypergraph(file_path):
+    """
+    Loads the HypergraphDataset object from the given file path.
 
-    # Print descriptive statistics
-    print("Author count statistics:")
-    print(f"  Total papers:     {len(author_counts)}")
-    print(f"  Min authors:      {np.min(author_counts)}")
-    print(f"  Max authors:      {np.max(author_counts)}")
-    print(f"  Mean authors:     {np.mean(author_counts):.2f}")
-    print(f"  Median authors:   {np.median(author_counts)}")
-    print(f"  Mode authors:     {stats.mode(author_counts, keepdims=False).mode} (count: {stats.mode(author_counts, keepdims=False).count})")
-    print(f"  Std deviation:    {np.std(author_counts):.2f}\n")
+    Args:
+        file_path (str): Path to the saved dataset (.pt file).
 
-    # Step 2: Fit distributions manually
-    results = {}
+    Returns:
+        HypergraphDataset: Loaded dataset object.
+    """
+    return torch.load(file_path)
 
-    # --- Poisson ---
-    lambda_poisson = np.mean(author_counts)
-    ks_stat, ks_p = stats.kstest(author_counts, 'poisson', args=(lambda_poisson,))
-    results['poisson'] = {'params': (lambda_poisson,), 'ks_stat': ks_stat, 'ks_p': ks_p}
+def analyze_authorship(dataset):
+    """
+    Analyzes authorship statistics in the hypergraph.
 
-    # --- Negative Binomial ---
-    mean = np.mean(author_counts)
-    var = np.var(author_counts)
-    if var > mean:
-        p_nb = mean / var
-        r_nb = mean**2 / (var - mean)
-        ks_stat, ks_p = stats.kstest(author_counts, 'nbinom', args=(r_nb, p_nb))
-        results['nbinom'] = {'params': (r_nb, p_nb), 'ks_stat': ks_stat, 'ks_p': ks_p}
-    else:
-        print("Skipping nbinom: variance <= mean, unsuitable for fitting.")
+    Args:
+        dataset (HypergraphDataset): The dataset to analyze.
+    """
+    author_counts = [len(authors) for authors in dataset.node_to_authors.values()]
+    
+    most_authors = max(author_counts)
+    fewest_authors = min(author_counts)
+    mean_authors = statistics.mean(author_counts)
+    median_authors = statistics.median(author_counts)
+    mode_authors = statistics.mode(author_counts)
 
-    # --- Log-normal ---
-    try:
-        params = stats.lognorm.fit(author_counts, floc=0)
-        ks_stat, ks_p = stats.kstest(author_counts, 'lognorm', args=params)
-        results['lognorm'] = {'params': params, 'ks_stat': ks_stat, 'ks_p': ks_p}
-    except Exception as e:
-        print(f"Could not fit lognorm: {e}")
+    # Find papers with the most authors
+    most_author_indices = [i for i, count in enumerate(author_counts) if count == most_authors]
+    most_author_papers = [dataset.paper_ids[i] for i in most_author_indices]
 
-    # --- Power-law ---
-    try:
-        params = stats.powerlaw.fit(author_counts, floc=0)
-        ks_stat, ks_p = stats.kstest(author_counts, 'powerlaw', args=params)
-        results['powerlaw'] = {'params': params, 'ks_stat': ks_stat, 'ks_p': ks_p}
-    except Exception as e:
-        print(f"Could not fit powerlaw: {e}")
+    # Count total unique authors
+    all_authors = [author for authors in dataset.node_to_authors.values() for author in authors]
+    unique_authors = set(all_authors)
+    author_frequency = Counter(all_authors)
 
-    # Step 3: Show comparison
-    print("\nGoodness-of-fit results (Kolmogorov-Smirnov):")
-    for name, result in sorted(results.items(), key=lambda x: x[1]['ks_stat']):
-        print(f"{name:<10} KS statistic: {result['ks_stat']:.4f}, p-value: {result['ks_p']:.4f}")
+    print("=== Hypergraph Authorship Statistics ===")
+    print(f"Total Papers: {len(dataset.paper_ids)}")
+    print(f"Total Unique Authors: {len(unique_authors)}")
+    print(f"Most Authors on a Single Paper: {most_authors}")
+    print(f"Fewest Authors on a Paper: {fewest_authors}")
+    print(f"Mean Authors per Paper: {mean_authors:.2f}")
+    print(f"Median Authors per Paper: {median_authors}")
+    print(f"Mode Authors per Paper: {mode_authors}")
+    print(f"Papers with Most Authors: {most_author_papers}")
+    print("\nTop 10 Most Frequent Authors:")
+    for author, count in author_frequency.most_common(10):
+        print(f"{author}: {count} papers")
 
-    # Step 4: Visualization
-    sns.histplot(author_counts, bins=range(1, max(author_counts)+1), stat="density", kde=False,
-                 color='skyblue', label='Empirical', edgecolor='black')
-
-    x = np.arange(1, max(author_counts) + 1)
-    for name, result in results.items():
-        params = result['params']
-        if name in ['poisson']:
-            pmf = stats.poisson.pmf(x, *params)
-            plt.plot(x, pmf, label=name)
-        elif name in ['nbinom']:
-            pmf = stats.nbinom.pmf(x, *params)
-            plt.plot(x, pmf, label=name)
-        else:
-            pdf = getattr(stats, name).pdf(x, *params)
-            plt.plot(x, pdf, label=name)
-
-    plt.xlabel("Number of authors per paper")
-    plt.ylabel("Density")
-    plt.title("Distribution fitting for number of authors per paper")
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-    return True 
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) != 2:
-        print("Usage: python analyze_hypergraph.py <input_file>")
-        sys.exit(1)
-    
-    main(sys.argv[1])
+    dataset_path = "arxiv-data/hypergraph_dataset.pt"
+    dataset = load_hypergraph(dataset_path)
+    analyze_authorship(dataset)
