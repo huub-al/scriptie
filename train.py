@@ -14,6 +14,8 @@ import torch.optim as optim
 from hypergraph_tmx import ArxivHyperGraph
 from model import InteractiveHGNN
 import utils
+
+
 def train_interactive_hgnn(input_file, num_epochs=15):
     """
     Train InteractiveHGNN on a mix of fake and real edges.
@@ -27,10 +29,11 @@ def train_interactive_hgnn(input_file, num_epochs=15):
     graph = ArxivHyperGraph(input_file)
     subgraph = graph.gen_subgraph(dropout=0.9)  # Keep 10% of edges
     node_features = subgraph.node_features
+    n_edges = subgraph.sub_H.shape[1] + 1
     
     # Initialize model
     print("Initializing InteractiveHGNN...")
-    model = InteractiveHGNN()
+    model = InteractiveHGNN(n_edges)
     
     # Use CPU to keep sparse tensor efficiency
     device = torch.device('cpu')
