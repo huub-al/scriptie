@@ -10,7 +10,7 @@ import torch.nn as nn
 from topomodelx.nn.hypergraph.allset_transformer import AllSetTransformer
 
 class InteractiveHGNN(nn.Module):
-    def __init__(self, in_dim=768, hidden_dim=768):
+    def __init__(self, n_edges, in_dim=768, hidden_dim=768):
         super().__init__()
         self.encoder = AllSetTransformer(
             in_channels=in_dim,
@@ -21,7 +21,7 @@ class InteractiveHGNN(nn.Module):
 
         # Head A: Hyperedge plausibility (binary classification)
         self.edge_classifier = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
+            nn.Linear(in_dim * n_edges, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 1)
         )
@@ -38,5 +38,5 @@ class InteractiveHGNN(nn.Module):
         """
         _, x_1 = self.encoder(x, incidence_matrix)
 
-        # the last row of the x_1 matrix is the edge
-        return self.edge_classifier(x_1[-1])
+        # we pass the entire feature matrix of edges.
+        return self.edge_classifier(x_1.flatten())

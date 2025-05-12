@@ -6,7 +6,7 @@ Branches and results
     Epoch 15/15, Average Loss: 0.3587
     - Pretty good, maybe to reliant on original embedding.
 
-- 
+- 32ba9491575ff81d617860a44a5a6c7493d4af6b
     forward with H + 1 column (hyperedge to predict)
     prediction head with only learned hyperedge repr.
     Epoch 8/15, Average Loss: 0.6670
