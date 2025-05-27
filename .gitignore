@@ -112,6 +112,9 @@ config.json
 *.gz
 *.png
 
+*.pt
+
+
 # arxiv-public-datasets
 arxiv-public-datasets/
 
