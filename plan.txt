@@ -2,6 +2,9 @@ Papers als nodes en authors als hyperedges.
 -> forward (x_0, incidence) -> logits 
     logits fungeren als classificatie en als confidence score.
 
+Trainen:
+    -
+
 Interactief model:
     -> laadt hypergraph structuur in.
     HITL:
@@ -11,7 +14,12 @@ Interactief model:
         -> Kan nieuwe node classificeren met nieuwe auteur(s)
             Model stelt hypergraph structuur en incidence matrix bij,
             Train als domein expert goedgekeurd heeft.
+        -> Krijgt judgement van model en kan hier in mee gaan/niet.
 
         Visualizatie:
         -> Kijken hoe het toevoegen van nieuwe nodes en edges door de domein expert 
             de accuracy verbeterd.
+
+FUNCTIONALITEIT MAKEN:
+    - Manier om de hypergraph class nodes te laten genereren die wel/niet/beetje plausible zijn
+    - extra label voor y "unlikely collaberation"

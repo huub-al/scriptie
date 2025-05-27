@@ -1,65 +1,94 @@
 # train_allset.py
 
 import torch
-import numpy as np
-from topomodelx.nn.hypergraph.allset_transformer import AllSetTransformer
-import torch.backends
+
 
 import sys
 sys.path.append("/Users/huubal/scriptie/data")
-from paperNodes_graph import HypergraphDataset
+from paperNodes_graph import arXivHyperGraph 
+from model import arXivHGNN
 
-class Network(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, task_level="node", **kwargs):
-        super().__init__()
-        self.base_model = AllSetTransformer(in_channels, hidden_channels, **kwargs)
-        self.linear = torch.nn.Linear(hidden_channels, out_channels)
-        self.out_pool = task_level == "graph"
 
-    def forward(self, x_0, incidence_1):
-        x_0, _ = self.base_model(x_0, incidence_1)
-        x = torch.max(x_0, dim=0)[0] if self.out_pool else x_0
-        return self.linear(x)
+def train(model, data, train_mask, val_mask, epochs=100, device='cpu'):
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=5e-4)
+    criterion = torch.nn.CrossEntropyLoss()
 
-def acc_fn(y_true, y_pred):
-    return (y_true == y_pred).float().mean()
+    model.train()
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        out = model(data.embeddings.to(device), data.incidence.to(device))
+        loss = criterion(out[train_mask], data.labels[train_mask].to(device))
+        loss.backward()
+        optimizer.step()
+
+    # Evaluation
+    model.eval()
+    with torch.no_grad():
+        out = model(data.embeddings.to(device), data.incidence.to(device))
+        pred = out.argmax(dim=1)
+        correct = pred[val_mask].eq(data.labels[val_mask].to(device)).sum().item()
+        acc = correct / val_mask.sum().item()
+        return acc
 
 def main():
-    device = torch.device("cpu" if torch.backends.mps.is_available() else "cpu")
-    dataset = torch.load("data/arxiv-data/cs_2000.pt")
-    x, y, incidence = dataset.x.to(device), dataset.y.to(device), dataset.incidence.to(device)
-    train_mask = dataset.train_mask.to(device)
-    val_mask = dataset.val_mask.to(device)
-    test_mask = dataset.test_mask.to(device)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    in_channels = x.shape[1]
-    out_channels = len(torch.unique(y))
-    hidden_channels = 128 
+    # Step 1: Initialize hypergraph and subgraph
+    print("Initializing Hypergraph...")
+    hypergraph = arXivHyperGraph("data/arxiv-data/subset_cs_2000.json.gz")
+    subgraph = hypergraph.construct_subgraph()
 
-    model = Network(in_channels, hidden_channels, out_channels, task_level="node").to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=0.01)
-    loss_fn = torch.nn.CrossEntropyLoss()
+    # Step 2: Add 1000 papers
+    print("Adding initial 1000 papers...")
+    subgraph.add_papers(1000, fake=0.3, plausible=0.3)
 
-    num_epochs = 15 
-    for epoch in range(1, num_epochs + 1):
-        model.train()
-        opt.zero_grad()
-        logits = model(x, incidence)
-        loss = loss_fn(logits[train_mask], y[train_mask])
-        loss.backward()
-        opt.step()
+    # Construct initial train/val mask
+    num_nodes = subgraph.embeddings.shape[0]
+    val_split = 0.2
+    indices = torch.randperm(num_nodes)
+    split = int((1 - val_split) * num_nodes)
+    train_mask = torch.zeros(num_nodes, dtype=torch.bool)
+    val_mask = torch.zeros(num_nodes, dtype=torch.bool)
+    train_mask[indices[:split]] = True
+    val_mask[indices[split:]] = True
 
-        model.eval()
-        with torch.no_grad():
-            logits = model(x, incidence)
-            train_acc = acc_fn(y[train_mask], logits[train_mask].argmax(dim=1))
-            val_acc = acc_fn(y[val_mask], logits[val_mask].argmax(dim=1))
-            test_acc = acc_fn(y[test_mask], logits[test_mask].argmax(dim=1))
+    # Step 3: Initialize model
+    in_dim = subgraph.embeddings.shape[1]
+    out_dim = len(hypergraph.full_label_map)
+    model = arXivHGNN(in_dim, hidden_channels=128, out_channels=out_dim).to(device)
 
-        print(
-            f"Epoch {epoch:02d} | Loss: {loss.item():.4f} | "
-            f"Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f} | Test Acc: {test_acc:.4f}"
-        )
+    print("\nInitial Training...")
+    acc = train(model, subgraph, train_mask, val_mask, epochs=100, device=device)
+    print(f"Initial Validation Accuracy: {acc:.4f}")
+
+    # Step 4: Iteratively add 100 papers, retrain, and report
+    for i in range(10):
+        print(f"\n--- Iteration {i+1} ---")
+        prev_nodes = subgraph.embeddings.shape[0]
+
+        print("Adding 100 new papers...")
+        subgraph.add_papers(100, fake=0.3, plausible=0.3)
+
+        new_nodes = subgraph.embeddings.shape[0]
+        added_range = torch.arange(prev_nodes, new_nodes)
+
+        # Extend masks: training only includes old and new nodes
+        new_train_mask = torch.cat([
+            train_mask,
+            torch.ones(len(added_range), dtype=torch.bool)
+        ])
+        new_val_mask = torch.cat([
+            val_mask,
+            torch.zeros(len(added_range), dtype=torch.bool)
+        ])
+
+        print("Retraining model...")
+        acc = train(model, subgraph, new_train_mask, new_val_mask, epochs=100, device=device)
+        print(f"Validation Accuracy after adding 100 papers: {acc:.4f}")
+
+        # Update masks for next iteration
+        train_mask = new_train_mask
+        val_mask = new_val_mask
 
 if __name__ == "__main__":
     main()
