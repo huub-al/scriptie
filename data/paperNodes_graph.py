@@ -42,6 +42,8 @@ class arXivHyperGraph:
         label_map (dict): Mapping from category names to label indices
         synthetic_labels (dict): Mapping from synthetic label names to indices
         full_label_map (dict): Combined mapping of real and synthetic labels
+        train_mask (torch.Tensor): Boolean mask for training nodes
+        val_mask (torch.Tensor): Boolean mask for validation nodes
     """
     
     def __init__(self, data_path="arxiv-data/subset_cs_2000.json.gz",
@@ -68,6 +70,23 @@ class arXivHyperGraph:
             self.model = AutoModel.from_pretrained(model_name).to(self.device)
             self._build()
             self._save_cache()
+            
+        # Generate train/val masks with 80/20 split
+        self._generate_masks()
+
+    def _generate_masks(self):
+        """
+        Generate training and validation masks with an 80/20 split.
+        """
+        num_nodes = len(self.paper_ids)
+        indices = torch.randperm(num_nodes)
+        train_size = int(0.8 * num_nodes)
+        
+        self.train_mask = torch.zeros(num_nodes, dtype=torch.bool)
+        self.val_mask = torch.zeros(num_nodes, dtype=torch.bool)
+        
+        self.train_mask[indices[:train_size]] = True
+        self.val_mask[indices[train_size:]] = True
 
     def _build(self):
         """
@@ -121,6 +140,22 @@ class arXivHyperGraph:
         print(f"Embedding shape: {self.x.shape}")
         print(f"Number of classes: {len(self.label_map)}")
         print(f"Average authors per paper: {self.author_mean:.2f}")
+
+    def _save_cache(self):
+        """
+        Save the hypergraph to a cache file for faster loading.
+        """
+        torch.save({
+            "x": self.x,
+            "y": self.y,
+            "paper_ids": self.paper_ids,
+            "node_to_authors": self.node_to_authors,
+            "author_mean": self.author_mean,
+            "author_pool": self.author_pool,
+            "paper_id_to_idx": self.paper_id_to_idx,
+            "label_map": self.label_map,
+            "synthetic_labels": self.synthetic_labels
+        }, self.cache_path)
 
     def _load_cache(self):
         """
@@ -243,6 +278,8 @@ class arXivSubGraph:
         labels (torch.Tensor): Paper labels tensor for the subgraph
         node_to_authors (dict): Mapping from node indices to author lists
         incidence (torch.Tensor): Sparse incidence matrix of author-paper relationships
+        train_mask (torch.Tensor): Boolean mask for training nodes in subgraph
+        val_mask (torch.Tensor): Boolean mask for validation nodes in subgraph
     """
     
     def __init__(self, hypergraph: arXivHyperGraph, indices):
@@ -266,6 +303,9 @@ class arXivSubGraph:
 
         # Build the initial incidence matrix
         self._rebuild_incidence()
+
+        self.outliers = []  # Track removed outlier indices (relative to subgraph)
+        self.removed_outliers_data = {}  # Maps index to (embedding, label, authors)
 
     def _rebuild_incidence(self):
         """
@@ -382,6 +422,9 @@ class arXivSubGraph:
 
             # Rebuild the incidence matrix to include new papers
             self._rebuild_incidence()
+            
+            # Regenerate masks after adding new papers
+            self.generate_masks()
 
     def remove_fake_papers(self):
         """
@@ -435,3 +478,140 @@ class arXivSubGraph:
         
         # Rebuild the incidence matrix
         self._rebuild_incidence()
+        
+        # Regenerate masks after removing papers
+        self.generate_masks()
+
+    def remove_outliers(self, outlier_fraction=0.01):
+        """
+        Remove papers that are statistical outliers based on embedding distance from the mean.
+        
+        Args:
+            outlier_fraction (float): Fraction of papers to remove as outliers (default: 0.01 for 1%).
+        """
+        if len(self.embeddings) == 0:
+            print("Warning: No embeddings to process for outlier removal.")
+            return
+        
+        # Calculate distances from the mean embedding
+        mean = self.embeddings.mean(dim=0)
+        distances = torch.norm(self.embeddings - mean, dim=1)
+        
+        # Determine the number of outliers to remove
+        num_outliers = max(1, int(len(self.embeddings) * outlier_fraction))
+        
+        # Get indices of the papers with largest distances (outliers)
+        _, outlier_indices = torch.topk(distances, num_outliers, largest=True)
+        outlier_indices = outlier_indices.tolist()
+        
+        # Create list of indices to keep
+        keep_indices = [i for i in range(len(self.embeddings)) if i not in outlier_indices]
+        
+        print(f"Removing {len(outlier_indices)} outliers out of {len(self.embeddings)} total papers ({len(outlier_indices)/len(self.embeddings)*100:.1f}%)")
+        
+        # Save outlier data for potential restoration
+        for i in outlier_indices:
+            self.removed_outliers_data[i] = (
+                self.embeddings[i].clone(),  # Clone to avoid reference issues
+                self.labels[i].clone(),
+                self.node_to_authors[i].copy(),  # Copy the author list
+            )
+        
+        # Track outlier indices
+        self.outliers.extend(outlier_indices)
+        
+        # Keep only non-outlier data
+        self.embeddings = self.embeddings[keep_indices]
+        self.labels = self.labels[keep_indices]
+        
+        # Rebuild node_to_authors mapping with new consecutive indices
+        new_node_to_authors = {}
+        for new_i, old_i in enumerate(keep_indices):
+            new_node_to_authors[new_i] = self.node_to_authors[old_i]  
+        self.node_to_authors = new_node_to_authors
+        
+        # Rebuild the incidence matrix
+        self._rebuild_incidence()
+        
+        # Regenerate masks after removing outliers
+        self.generate_masks()
+
+    def restore_outliers(self):
+        """
+        Restore previously removed outlier papers back into the subgraph.
+        """
+        if not self.removed_outliers_data:
+            return
+
+        new_embeddings, new_labels = [], []
+        new_authors = []
+
+        for old_idx in self.outliers:
+            emb, label, authors = self.removed_outliers_data[old_idx]
+            new_embeddings.append(emb.unsqueeze(0))
+            new_labels.append(label.unsqueeze(0))
+            new_authors.append(authors)
+
+        if new_embeddings:
+            self.embeddings = torch.cat([self.embeddings] + new_embeddings, dim=0)
+            self.labels = torch.cat([self.labels] + new_labels, dim=0)
+            offset = len(self.node_to_authors)
+            for i, authors in enumerate(new_authors):
+                self.node_to_authors[offset + i] = authors
+
+            self._rebuild_incidence()
+            
+            # Regenerate masks after restoring outliers
+            self.generate_masks()
+
+        # Clear tracking
+        self.outliers.clear()
+        self.removed_outliers_data.clear()
+
+    def construct_outlier_neighbourhood(self):
+        """
+        Construct a subgraph containing only the outliers and their one-hop neighbors.
+        
+        Returns:
+            arXivSubGraph: A new subgraph containing only the outliers and their neighbors,
+                          or None if no outliers exist.
+        """
+        if not self.outliers:
+            print("No outliers to construct neighborhood from.")
+            return None
+            
+        # Get all authors from outliers
+        outlier_authors = set()
+        for old_idx in self.outliers:
+            _, _, authors = self.removed_outliers_data[old_idx]
+            outlier_authors.update(authors)
+            
+        # Find all papers that share authors with outliers (one-hop neighbors)
+        neighbor_indices = set()
+        for idx, authors in self.node_to_authors.items():
+            if any(author in outlier_authors for author in authors):
+                neighbor_indices.add(idx)
+                
+        # Combine outlier indices with neighbor indices
+        # Note: We need to map the old outlier indices to their new positions
+        # in the current graph structure
+        all_indices = list(neighbor_indices)
+        
+        # Create a new subgraph with these indices
+        return arXivSubGraph(self.hypergraph, all_indices)
+
+    def generate_masks(self):
+        """
+        Generate training and validation masks for the subgraph based on the parent graph's masks.
+        The masks are generated by mapping the parent graph's train/val assignments to the subgraph's indices.
+        """
+        num_nodes = len(self.indices)
+        self.train_mask = torch.zeros(num_nodes, dtype=torch.bool)
+        self.val_mask = torch.zeros(num_nodes, dtype=torch.bool)
+        
+        # Map parent graph's train/val assignments to subgraph indices
+        for i, parent_idx in enumerate(self.indices):
+            if self.hypergraph.train_mask[parent_idx]:
+                self.train_mask[i] = True
+            elif self.hypergraph.val_mask[parent_idx]:
+                self.val_mask[i] = True
